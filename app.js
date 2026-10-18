@@ -1,12 +1,38 @@
 'use strict';
-const APP_VERSION='3';
+const APP_VERSION='4';
 const $=s=>document.querySelector(s), player=$('#player');
 let db, catalog=null, currentChild='', selected=null, objectURL=null, selectionVersion=0, shellReady=false, busy=false, mediaRangeReady=false, playbackTimer=null, playbackRoute='range', compatibleTicket=0;
 const en=player.addTextTrack('subtitles','English','en'),zh=player.addTextTrack('subtitles','中文','zh');en.mode=zh.mode='disabled';
 const setStatus=(text,bad=false)=>{$('#status').textContent=text;$('#status').className='status '+(bad?'notice':'');};
 function openDB(){return new Promise((resolve,reject)=>{const r=indexedDB.open('family-cinema-local-v1',1);r.onupgradeneeded=()=>{r.result.createObjectStore('media');r.result.createObjectStore('settings');};r.onsuccess=()=>{r.result.onversionchange=()=>r.result.close();resolve(r.result);};r.onerror=()=>reject(r.error);r.onblocked=()=>reject(new Error('请关闭其他小影院页面后重试。'));});}
-function get(store,key){return new Promise((resolve,reject)=>{const r=db.transaction(store,'readonly').objectStore(store).get(key);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});}
-function put(store,key,value){return new Promise((resolve,reject)=>{const t=db.transaction(store,'readwrite');t.objectStore(store).put(value,key);t.oncomplete=()=>resolve();t.onabort=t.onerror=()=>reject(t.error||new Error('本机保存失败'));});}
+function withTimeout(promise,ms,message){return new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error(message)),ms);Promise.resolve(promise).then(v=>{clearTimeout(timer);resolve(v);},e=>{clearTimeout(timer);reject(e);});});}
+function get(store,key){return new Promise((resolve,reject)=>{
+ const tx=db.transaction(store,'readonly'),r=tx.objectStore(store).get(key);
+ const timer=setTimeout(()=>{try{tx.abort();}catch{}reject(new Error('本机读取超时。请关闭小影院后重开，再选择原视频包恢复。'));},15000);
+ r.onsuccess=()=>{clearTimeout(timer);resolve(r.result);};r.onerror=()=>{clearTimeout(timer);reject(r.error);};tx.onabort=()=>{clearTimeout(timer);reject(tx.error||new Error('本机读取中断'));};
+});}
+function put(store,key,value){return new Promise((resolve,reject)=>{
+ const tx=db.transaction(store,'readwrite');tx.objectStore(store).put(value,key);
+ const timer=setTimeout(()=>{try{tx.abort();}catch{}reject(new Error('本机保存超时。请关闭其他小影院窗口后再试，原视频包不用重新下载。'));},20000);
+ tx.oncomplete=()=>{clearTimeout(timer);resolve();};tx.onabort=tx.onerror=()=>{clearTimeout(timer);reject(tx.error||new Error('本机保存失败'));};
+});}
+function mediaSize(value){return value instanceof Blob?value.size:value instanceof ArrayBuffer?value.byteLength:-1;}
+async function mediaBytes(value){
+ if(value instanceof ArrayBuffer)return value;
+ if(value instanceof Blob)return withTimeout(value.arrayBuffer(),20000,'旧视频数据读取超时。请在家长设置重新选择原ZIP恢复。');
+ throw new Error('本机视频记录缺失，请重新选择原ZIP恢复。');
+}
+async function digestBytes(bytes){return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');}
+// Repair never reads an existing media record before replacement. Verify the ZIP bytes first,
+// then store a structured-cloned ArrayBuffer, not a file-backed Blob reference.
+async function saveVerifiedVideo(file,entries,v,onStage){
+ onStage('读取');const part=await withTimeout(entryBlob(file,entries.get(v.archivePath),'video/mp4'),20000,'视频包读取超时，请在“文件”中确认ZIP已下载到这台iPad。');
+ const bytes=await withTimeout(part.arrayBuffer(),30000,'读取视频超时，请确认原ZIP已下载到这台iPad，再重新选择。');
+ if(bytes.byteLength!==v.bytes||await digestBytes(bytes)!==v.sha256)throw new Error('原ZIP内的视频校验未通过，请确认选择的是完整原包。');
+ onStage('保存');await put('media',v.sha256,bytes);
+ onStage('检查');const saved=await get('media',v.sha256);
+ if(!(saved instanceof ArrayBuffer)||saved.byteLength!==v.bytes||await digestBytes(saved)!==v.sha256)throw new Error('本机保存检查未通过，请保留此提示，暂时不要反复导入。');
+}
 async function checkShell(){
  if(!window.isSecureContext || !('serviceWorker' in navigator))throw new Error('这个地址无法安装离线版。请使用家长提供的HTTPS安装地址；局域网HTTP或文件预览不能完成安装。');
  const registration=await navigator.serviceWorker.register('sw.js',{scope:'./',updateViaCache:'none'});registration.update().catch(()=>{});const reg=await navigator.serviceWorker.ready;
@@ -14,7 +40,7 @@ async function checkShell(){
  return new Promise((resolve,reject)=>{const channel=new MessageChannel();const t=setTimeout(()=>reject(new Error('离线页面检查超时，请联网重试。')),12000);channel.port1.onmessage=e=>{clearTimeout(t);mediaRangeReady=e.data.mediaRange===true;resolve(e.data.ready===true);};(navigator.serviceWorker.controller||reg.active).postMessage({type:'CHECK_SHELL'},[channel.port2]);});
 }
 function standalone(){return navigator.standalone===true||matchMedia('(display-mode: standalone)').matches;}
-async function checkLibrary(c){if(!c?.videos?.length)return false;for(const v of c.videos){const b=await get('media',v.sha256);if(!(b instanceof Blob)||b.size!==v.bytes)return false;}return true;}
+async function checkLibrary(c){if(!c?.videos?.length)return false;for(const v of c.videos){const b=await get('media',v.sha256);if(mediaSize(b)!==v.bytes)return false;}return true;}
 function readiness(){const n=catalog?.videos?.length||0;$('#badge').textContent=n?`${n} 条本地视频 · 不自动连播`:'首次使用，请导入视频包';$('#offlineStatus').textContent=n?(shellReady?' · 离线页面已就绪':' · 离线页面待检查'):'';}
 function applyCaptions(){const val=$('#captions').value;en.mode=val==='en'?'showing':'disabled';zh.mode=val==='zh'?'showing':'disabled';}
 $('#captions').onchange=applyCaptions;
@@ -34,9 +60,9 @@ async function prepareCompatiblePlayback(v,ticket=selectionVersion,playNow=false
  $('#playerError').textContent='正在检查完整视频并准备兼容播放，请稍等……';
  try{
   const saved=await get('media',v.sha256);
-  if(!(saved instanceof Blob)||saved.size!==v.bytes)throw new Error('本机视频不完整。请在家长设置重新选择原ZIP恢复，不用重新下载。');
-  const bytes=await saved.arrayBuffer();
-  const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');
+  if(mediaSize(saved)!==v.bytes)throw new Error('本机视频不完整。请在家长设置重新选择原ZIP恢复，不用重新下载。');
+  const bytes=await mediaBytes(saved);
+  const hash=await digestBytes(bytes);
   if(ticket!==selectionVersion)return;
   if(bytes.byteLength!==v.bytes||hash!==v.sha256)throw new Error('本机视频完整性检查未通过。请在家长设置重新选择原ZIP，程序会替换损坏的本机副本；不用重新下载。');
   if(objectURL)URL.revokeObjectURL(objectURL);
@@ -53,7 +79,7 @@ async function selectVideo(v,playNow=false){
  for(const [lang,track]of[['en',en],['zh',zh]]){track.mode='hidden';if(track.cues)Array.from(track.cues).forEach(c=>track.removeCue(c));for(const c of v.tracks?.[lang]||[])track.addCue(new VTTCue(c.s,c.e,c.t));track.mode='disabled';}
  $('#captions').hidden=!Object.keys(v.tracks||{}).length;applyCaptions();renderCards();
  try{
-  if(!mediaRangeReady)await checkShell();
+  if(!mediaRangeReady)await withTimeout(checkShell(),15000,'播放组件检查超时，请点“兼容播放”直接读取本机视频。');
   if(ticket!==selectionVersion)return;
   if(!mediaRangeReady)throw new Error('播放组件正在更新。请联网关闭小影院，再重新打开；不用删除或重新导入视频。');
   // The service worker reads the existing IndexedDB video and serves Safari byte ranges.
@@ -98,27 +124,41 @@ function validateCatalog(c,entries){
  if(c?.format!=='family-cinema-pack-v1'||!Array.isArray(c.videos)||!c.videos.length||c.videos.length>100)throw new Error('不是本次小影院视频包。');const ids=new Set();
  for(const v of c.videos){if(typeof v.key!=='string'||ids.has(v.key)||!/^media\/[a-zA-Z0-9_-]+\.mp4$/.test(v.archivePath)||! /^[a-f0-9]{64}$/.test(v.sha256)||!Number.isSafeInteger(v.bytes)||v.bytes<=0||v.bytes>512*1024*1024||entries.get(v.archivePath)?.length!==v.bytes)throw new Error('视频包清单与文件不一致。');ids.add(v.key);for(const k of ['child','title','performer','focus','note','time'])if(typeof v[k]!=='string'||v[k].length>3000)throw new Error('视频说明异常。');if(!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(v.posterData)||v.posterData.length>2e6)throw new Error('封面数据异常。');for(const cs of Object.values(v.tracks||{})){if(!Array.isArray(cs)||cs.length>10000)throw new Error('字幕异常。');for(const q of cs)if(!Number.isFinite(q.s)||!Number.isFinite(q.e)||q.s<0||q.e<=q.s||typeof q.t!=='string'||q.t.length>5000)throw new Error('字幕时间异常。');}}
 }
-$('#import').onclick=()=>{if(!busy)$('#file').click();};
+$('#import').onclick=()=>{
+ if(busy)return;
+ $('#file').value='';setStatus('请选择原来的ZIP视频包。选好后这里会立即显示读取进度。');$('#file').click();
+};
+$('#file').oncancel=()=>{if(!busy)setStatus('尚未选择视频包。点上方按钮，选择原来的ZIP即可。');};
 $('#file').onchange=async()=>{
  const file=$('#file').files?.[0];if(!file||busy)return;
+ $('#file').value='';
  if(!window.isSecureContext){setStatus('请从HTTPS安装入口打开，不要在文件预览或旧局域网地址导入。',true);return;}
  busy=true;$('#import').disabled=true;$('#closeSetup').hidden=true;$('#progress').hidden=false;$('#progress').value=0;
- let persistent=false;try{if(navigator.storage?.persist)persistent=await navigator.storage.persist();}catch{}
+ $('#setup').hidden=false;$('#setup').scrollIntoView({behavior:'smooth'});
+ ++selectionVersion;compatibleTicket=0;clearTimeout(playbackTimer);playbackRoute='importing';player.pause();player.removeAttribute('src');player.load();
+ if(objectURL){URL.revokeObjectURL(objectURL);objectURL=null;}
+ let stage='读取视频包目录';
+ setStatus(`已选中视频包（${Math.round(file.size/1024/1024)} MB），正在读取目录……`);
  try{
-  shellReady=await checkShell();if(!shellReady)throw new Error('离线页面没有保存完整，请联网重试。');
-  setStatus('正在读取视频包……');const entries=await zipEntries(file);const meta=entries.get('catalog.json');if(!meta||meta.length>16*1024*1024)throw new Error('视频包缺少有效目录。');const next=JSON.parse(await(await entryBlob(file,meta,'application/json')).text());validateCatalog(next,entries);
-  const estimate=await navigator.storage?.estimate?.();let needed=0;for(const v of next.videos){const old=await get('media',v.sha256);if(!(old instanceof Blob)||old.size!==v.bytes)needed+=v.bytes;}
-  if(estimate?.quota && estimate?.usage && estimate.quota-estimate.usage<needed+10*1024*1024)throw new Error('iPad可用网页存储不足，请清理空间后再导入。');
+  if(!db)db=await withTimeout(openDB(),15000,'无法打开本机存储，请关闭其他小影院窗口后重试。');
+  const entries=await withTimeout(zipEntries(file),20000,'读取ZIP目录超时，请先在“文件”中确认ZIP已完整下载到这台iPad。');
+  const meta=entries.get('catalog.json');if(!meta||meta.length>16*1024*1024)throw new Error('视频包缺少有效目录，请选择原来的专用ZIP。');
+  const next=JSON.parse(await withTimeout((async()=> (await entryBlob(file,meta,'application/json')).text())(),15000,'视频目录读取超时。'));
+  validateCatalog(next,entries);
   for(let i=0;i<next.videos.length;i++){
-   const v=next.videos[i];setStatus(`正在保存 ${i+1}/${next.videos.length}：${v.title}\n请保持小影院在前台，暂时不要锁屏。`);let blob=await get('media',v.sha256);
-   if(!(blob instanceof Blob)||blob.size!==v.bytes||await sha256(blob)!==v.sha256){blob=await entryBlob(file,entries.get(v.archivePath),'video/mp4');if(await sha256(blob)!==v.sha256)throw new Error(`“${v.title}”不完整，请重新传入视频包。`);blob=new Blob([await blob.arrayBuffer()],{type:'video/mp4'});await put('media',v.sha256,blob);const saved=await get('media',v.sha256);if(!(saved instanceof Blob)||saved.size!==v.bytes||await sha256(saved)!==v.sha256)throw new Error('写入后的完整性检查未通过，请重新选择原视频包。');}
+   const v=next.videos[i];await saveVerifiedVideo(file,entries,v,action=>{stage=`${action} ${i+1}/${next.videos.length}：${v.title}`;setStatus(`正在${stage}\n请保持小影院在前台，不要锁屏。`);});
    $('#progress').value=Math.round((i+1)/next.videos.length*100);
   }
-  if(!await checkLibrary(next))throw new Error('视频未全部保存完成。');await put('settings','catalog',next);catalog=next;await showLibrary();
-  const installHint=standalone()?'现在可以开启飞行模式，关闭再打开本App试播；成功后Mac即可关机。':'请先添加到主屏幕，再从“小影院”图标打开。若主屏幕App显示未导入，请在那里再导入同一个包。';
-  setStatus(`离线准备完成：${catalog.videos.length}/${catalog.videos.length}条视频已保存在本机。\n${installHint}`);$('#offlineStatus').textContent=' · 离线准备完成';await put('settings','storagePersistence',persistent);$('#closeSetup').hidden=false;
- }catch(e){setStatus(e.name==='QuotaExceededError'?'iPad存储空间不足，已保存部分可以保留；清理空间后重新选择同一个包继续。':`未完成：${e.message}\n已保存的视频可复用，重新选择同一个视频包即可继续。`,true);}
- finally{busy=false;$('#import').disabled=false;$('#file').value='';}
+  stage='保存选片目录';await put('settings','catalog',next);catalog=next;
+  // Permission/persistence requests must never delay file selection or repair.
+  try{navigator.storage?.persist?.().catch(()=>{});}catch{}
+  stage='检查离线页面';setStatus('视频已完整保存，正在检查离线页面……');
+  let shellNote='';try{shellReady=await withTimeout(checkShell(),15000,'离线页面检查超时');}catch(e){shellReady=false;shellNote=e.message;}
+  await showLibrary();
+  setStatus(shellReady?`离线准备完成：${catalog.videos.length}/${catalog.videos.length}条视频已重新保存并通过完整检查。点“收起设置，开始选片”试播。`:`${catalog.videos.length}条视频已完整保存。离线页面尚未确认：${shellNote}。请联网关闭后重新打开，不用再次导入。`,!shellReady);
+  $('#offlineStatus').textContent=shellReady?' · 离线准备完成':' · 视频已保存';$('#closeSetup').hidden=false;
+ }catch(e){setStatus(`停在：${stage}\n${e.name==='QuotaExceededError'?'iPad网页存储空间不足，请释放空间后再恢复。':e.message}\n原ZIP和已保存视频保留。`,true);if(catalog)$('#closeSetup').hidden=false;}
+ finally{busy=false;$('#import').disabled=false;}
 };
 (async()=>{
  try{db=await openDB();const stored=await get('settings','catalog');if(await checkLibrary(stored)){catalog=stored;await showLibrary();$('#setup').hidden=true;}else setStatus('请从主屏幕打开后，导入家长准备的视频包。');}

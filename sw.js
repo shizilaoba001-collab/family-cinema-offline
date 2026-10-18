@@ -1,5 +1,5 @@
 'use strict';
-const VERSION='family-cinema-shell-v3';
+const VERSION='family-cinema-shell-v4';
 const FILES=['./','index.html','style.css','app.js','manifest.webmanifest','icon-180.png','icon-192.png','icon-512.png'];
 const URLS=FILES.map(p=>new URL(p,self.registration.scope).href);
 self.addEventListener('install',event=>event.waitUntil((async()=>{const c=await caches.open(VERSION);await c.addAll(URLS.map(u=>new Request(u,{cache:'reload'})));await self.skipWaiting();})()));
@@ -13,7 +13,8 @@ function readMedia(key){return new Promise((resolve,reject)=>{
 });}
 async function mediaResponse(request,key){
  try{
-  const blob=await readMedia(key);
+  const stored=await readMedia(key);
+  const blob=stored instanceof ArrayBuffer?new Blob([stored],{type:'video/mp4'}):stored;
   if(!(blob instanceof Blob)||blob.size===0)return new Response('Local video is missing',{status:404});
   const total=blob.size,headers={'Content-Type':'video/mp4','Accept-Ranges':'bytes','Cache-Control':'no-store','Content-Length':String(total)};
   if(request.method==='HEAD')return new Response(null,{status:200,headers});
