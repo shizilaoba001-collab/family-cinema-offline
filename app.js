@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION='5';
+const APP_VERSION='6';
 const $=s=>document.querySelector(s), player=$('#player');
 let db, catalog=null, currentChild='', selected=null, objectURL=null, selectionVersion=0, shellReady=false, busy=false, mediaRangeReady=false, playbackTimer=null, playbackRoute='memory', compatibleTicket=0;
 const en=player.addTextTrack('subtitles','English','en'),zh=player.addTextTrack('subtitles','中文','zh');en.mode=zh.mode='disabled';
@@ -112,13 +112,18 @@ async function entryBlob(file,entry,type='application/octet-stream'){
  if(!entry)throw new Error('视频包缺少必需文件。');const a=entry.local;if(a+30>file.size)throw new Error('视频包损坏。');const h=new DataView(await file.slice(a,a+30).arrayBuffer());if(h.getUint32(0,true)!==0x04034b50)throw new Error('视频包头损坏。');const s=a+30+h.getUint16(26,true)+h.getUint16(28,true);if(s+entry.length>file.size)throw new Error('视频未下载完整。');return file.slice(s,s+entry.length,type);
 }
 async function sha256(blob){const bytes=await crypto.subtle.digest('SHA-256',await blob.arrayBuffer());return Array.from(new Uint8Array(bytes)).map(v=>v.toString(16).padStart(2,'0')).join('');}
+function mergeCatalogs(previous,incoming){
+ const videos=new Map((previous?.videos||[]).map(v=>[v.key,v]));
+ for(const v of incoming.videos)videos.set(v.key,v);
+ return {...previous,...incoming,groups:{...previous?.groups,...incoming.groups},videos:[...videos.values()]};
+}
 function validateCatalog(c,entries){
  if(c?.format!=='family-cinema-pack-v1'||!Array.isArray(c.videos)||!c.videos.length||c.videos.length>100)throw new Error('不是本次小影院视频包。');const ids=new Set();
  for(const v of c.videos){if(typeof v.key!=='string'||ids.has(v.key)||!/^media\/[a-zA-Z0-9_-]+\.mp4$/.test(v.archivePath)||! /^[a-f0-9]{64}$/.test(v.sha256)||!Number.isSafeInteger(v.bytes)||v.bytes<=0||v.bytes>512*1024*1024||entries.get(v.archivePath)?.length!==v.bytes)throw new Error('视频包清单与文件不一致。');ids.add(v.key);for(const k of ['child','title','performer','focus','note','time'])if(typeof v[k]!=='string'||v[k].length>3000)throw new Error('视频说明异常。');if(!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(v.posterData)||v.posterData.length>2e6)throw new Error('封面数据异常。');for(const cs of Object.values(v.tracks||{})){if(!Array.isArray(cs)||cs.length>10000)throw new Error('字幕异常。');for(const q of cs)if(!Number.isFinite(q.s)||!Number.isFinite(q.e)||q.s<0||q.e<=q.s||typeof q.t!=='string'||q.t.length>5000)throw new Error('字幕时间异常。');}}
 }
 $('#import').onclick=()=>{
  if(busy)return;
- $('#file').value='';setStatus('请选择原来的ZIP视频包。选好后这里会立即显示读取进度。');$('#file').click();
+ $('#file').value='';setStatus('请选择新增视频包或原ZIP恢复包。选好后这里会立即显示读取进度。');$('#file').click();
 };
 $('#file').oncancel=()=>{if(!busy)setStatus('尚未选择视频包。点上方按钮，选择原来的ZIP即可。');};
 $('#file').onchange=async()=>{
@@ -141,13 +146,13 @@ $('#file').onchange=async()=>{
    const v=next.videos[i];await saveVerifiedVideo(file,entries,v,action=>{stage=`${action} ${i+1}/${next.videos.length}：${v.title}`;setStatus(`正在${stage}\n请保持小影院在前台，不要锁屏。`);});
    $('#progress').value=Math.round((i+1)/next.videos.length*100);
   }
-  stage='保存选片目录';await put('settings','catalog',next);catalog=next;
+  stage='合并选片目录';const previous=await get('settings','catalog');const merged=mergeCatalogs(previous,next);await put('settings','catalog',merged);catalog=merged;
   // Permission/persistence requests must never delay file selection or repair.
   try{navigator.storage?.persist?.().catch(()=>{});}catch{}
   stage='检查离线页面';setStatus('视频已完整保存，正在检查离线页面……');
   let shellNote='';try{shellReady=await withTimeout(checkShell(),15000,'离线页面检查超时');}catch(e){shellReady=false;shellNote=e.message;}
   await showLibrary();
-  setStatus(shellReady?`离线准备完成：${catalog.videos.length}/${catalog.videos.length}条视频已重新保存并通过完整检查。点“收起设置，开始选片”试播。`:`${catalog.videos.length}条视频已完整保存。离线页面尚未确认：${shellNote}。请联网关闭后重新打开，不用再次导入。`,!shellReady);
+  setStatus(shellReady?`离线准备完成：本次${next.videos.length}条视频已保存并通过完整检查，片库共${catalog.videos.length}条。点“收起设置，开始选片”试播。`:`本次${next.videos.length}条视频已完整保存，片库共${catalog.videos.length}条。离线页面尚未确认：${shellNote}。请联网关闭后重新打开，不用再次导入。`,!shellReady);
   $('#offlineStatus').textContent=shellReady?' · 离线准备完成':' · 视频已保存';$('#closeSetup').hidden=false;
  }catch(e){setStatus(`停在：${stage}\n${e.name==='QuotaExceededError'?'iPad网页存储空间不足，请释放空间后再恢复。':e.message}\n原ZIP和已保存视频保留。`,true);if(catalog)$('#closeSetup').hidden=false;}
  finally{busy=false;$('#import').disabled=false;}

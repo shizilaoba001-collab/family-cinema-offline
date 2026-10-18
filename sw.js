@@ -1,5 +1,5 @@
 'use strict';
-const VERSION='family-cinema-shell-v5';
+const VERSION='family-cinema-shell-v6';
 const FILES=['./','index.html','style.css','app.js','manifest.webmanifest','icon-180.png','icon-192.png','icon-512.png'];
 const URLS=FILES.map(p=>new URL(p,self.registration.scope).href);
 self.addEventListener('install',event=>event.waitUntil((async()=>{const c=await caches.open(VERSION);await c.addAll(URLS.map(u=>new Request(u,{cache:'reload'})));await self.skipWaiting();})()));
