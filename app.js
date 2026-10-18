@@ -1,7 +1,7 @@
 'use strict';
-const APP_VERSION='2';
+const APP_VERSION='3';
 const $=s=>document.querySelector(s), player=$('#player');
-let db, catalog=null, currentChild='', selected=null, objectURL=null, selectionVersion=0, shellReady=false, busy=false, mediaRangeReady=false, playbackTimer=null;
+let db, catalog=null, currentChild='', selected=null, objectURL=null, selectionVersion=0, shellReady=false, busy=false, mediaRangeReady=false, playbackTimer=null, playbackRoute='range', compatibleTicket=0;
 const en=player.addTextTrack('subtitles','English','en'),zh=player.addTextTrack('subtitles','中文','zh');en.mode=zh.mode='disabled';
 const setStatus=(text,bad=false)=>{$('#status').textContent=text;$('#status').className='status '+(bad?'notice':'');};
 function openDB(){return new Promise((resolve,reject)=>{const r=indexedDB.open('family-cinema-local-v1',1);r.onupgradeneeded=()=>{r.result.createObjectStore('media');r.result.createObjectStore('settings');};r.onsuccess=()=>{r.result.onversionchange=()=>r.result.close();resolve(r.result);};r.onerror=()=>reject(r.error);r.onblocked=()=>reject(new Error('请关闭其他小影院页面后重试。'));});}
@@ -27,9 +27,28 @@ function startPlayback(){
  playbackTimer=setTimeout(()=>{if(player.currentTime===0 && player.readyState<3)$('#playerError').textContent='视频读取较慢。请点“重新加载本片”；若仍失败，把下方错误信息告诉家长。';},15000);
  if(attempt)attempt.catch(e=>{clearTimeout(playbackTimer);$('#playerError').textContent=e.name==='NotAllowedError'?'视频已准备好，请再点一次播放。':`无法播放（${e.name}）。请点“重新加载本片”。`;});
 }
+async function prepareCompatiblePlayback(v,ticket=selectionVersion,playNow=false){
+ if(compatibleTicket===ticket)return;
+ compatibleTicket=ticket;playbackRoute='checking';clearTimeout(playbackTimer);
+ player.pause();player.removeAttribute('src');player.load();
+ $('#playerError').textContent='正在检查完整视频并准备兼容播放，请稍等……';
+ try{
+  const saved=await get('media',v.sha256);
+  if(!(saved instanceof Blob)||saved.size!==v.bytes)throw new Error('本机视频不完整。请在家长设置重新选择原ZIP恢复，不用重新下载。');
+  const bytes=await saved.arrayBuffer();
+  const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');
+  if(ticket!==selectionVersion)return;
+  if(bytes.byteLength!==v.bytes||hash!==v.sha256)throw new Error('本机视频完整性检查未通过。请在家长设置重新选择原ZIP，程序会替换损坏的本机副本；不用重新下载。');
+  if(objectURL)URL.revokeObjectURL(objectURL);
+  objectURL=URL.createObjectURL(new Blob([bytes],{type:'video/mp4'}));
+  playbackRoute='memory';player.src=objectURL;player.load();
+  $('#playerError').textContent='视频完整，兼容模式已准备好。请点“播放”。';
+  if(playNow)startPlayback();
+ }catch(e){if(ticket===selectionVersion){playbackRoute='failed';$('#playerError').textContent=e.message;}}
+}
 async function selectVideo(v,playNow=false){
  if(selected?.key===v.key && player.getAttribute('src') && playNow){startPlayback();return;}
- const ticket=++selectionVersion;clearTimeout(playbackTimer);selected=v;player.pause();player.removeAttribute('src');player.load();if(objectURL){URL.revokeObjectURL(objectURL);objectURL=null;}
+ const ticket=++selectionVersion;compatibleTicket=0;playbackRoute='range';clearTimeout(playbackTimer);selected=v;player.pause();player.removeAttribute('src');player.load();if(objectURL){URL.revokeObjectURL(objectURL);objectURL=null;}
  $('#cinema').hidden=false;player.poster=v.posterData;$('#title').textContent=v.title;$('#performer').textContent=v.performer+' · '+v.time;$('#focus').textContent=v.focus;$('#note').textContent=v.note;$('#playerError').textContent='';
  for(const [lang,track]of[['en',en],['zh',zh]]){track.mode='hidden';if(track.cues)Array.from(track.cues).forEach(c=>track.removeCue(c));for(const c of v.tracks?.[lang]||[])track.addCue(new VTTCue(c.s,c.e,c.t));track.mode='disabled';}
  $('#captions').hidden=!Object.keys(v.tracks||{}).length;applyCaptions();renderCards();
@@ -42,16 +61,15 @@ async function selectVideo(v,playNow=false){
   if(playNow)startPlayback();
  }catch(e){if(ticket===selectionVersion)$('#playerError').textContent=e.message;}
 }
-$('#playVideo').onclick=startPlayback;
+$('#playVideo').onclick=()=>{if(player.getAttribute('src'))startPlayback();else if(selected && playbackRoute!=='checking'){$('#playerError').textContent='请点“重新加载本片”或“兼容播放”。';}};
+$('#compatibleVideo').onclick=()=>{if(selected){if(playbackRoute==='memory'){startPlayback();}else prepareCompatiblePlayback(selected,selectionVersion,true);}};
 $('#retryVideo').onclick=()=>{if(selected){const v=selected;selected=null;selectVideo(v,true);}};
 player.addEventListener('playing',()=>{clearTimeout(playbackTimer);$('#playerError').textContent='';});
 player.addEventListener('error',async()=>{
- if(!player.getAttribute('src'))return;
+ if(!player.getAttribute('src')||playbackRoute==='checking')return;
  clearTimeout(playbackTimer);const ticket=selectionVersion,code=player.error?.code||0;
- $('#playerError').textContent=`视频无法播放（错误 ${code}）。正在检查本机视频……`;
- try{const r=await fetch(player.src,{headers:{Range:'bytes=0-1'}});const bytes=await r.arrayBuffer();if(ticket!==selectionVersion)return;
-  $('#playerError').textContent=r.status===206&&bytes.byteLength===2?`本机视频可读取，播放器错误 ${code}。请点“重新加载本片”；若仍失败，请把此错误码和iPad系统版本告诉家长。`:`本机视频读取失败（${r.status}）。请在家长设置中重新选择原视频包恢复；不需要重新下载。`;
- }catch(e){if(ticket===selectionVersion)$('#playerError').textContent=`本机读取失败：${e.name}。请重新打开小影院。`;}
+ if(playbackRoute==='range' && selected){await prepareCompatiblePlayback(selected,ticket,false);return;}
+ $('#playerError').textContent=`视频完整性已通过，但兼容播放仍失败（错误 ${code}）。请把此提示告诉家长。`;
 });
 async function showLibrary(){currentChild=catalog.videos[0].child;renderTabs();await selectVideo(catalog.videos[0]);readiness();$('#closeSetup').hidden=false;}
 $('#manage').onclick=()=>{$('#setup').hidden=false;$('#setup').scrollIntoView({behavior:'smooth'});};$('#closeSetup').onclick=()=>{$('#setup').hidden=true;};
@@ -93,7 +111,7 @@ $('#file').onchange=async()=>{
   if(estimate?.quota && estimate?.usage && estimate.quota-estimate.usage<needed+10*1024*1024)throw new Error('iPad可用网页存储不足，请清理空间后再导入。');
   for(let i=0;i<next.videos.length;i++){
    const v=next.videos[i];setStatus(`正在保存 ${i+1}/${next.videos.length}：${v.title}\n请保持小影院在前台，暂时不要锁屏。`);let blob=await get('media',v.sha256);
-   if(!(blob instanceof Blob)||blob.size!==v.bytes){blob=await entryBlob(file,entries.get(v.archivePath),'video/mp4');if(await sha256(blob)!==v.sha256)throw new Error(`“${v.title}”不完整，请重新传入视频包。`);blob=new Blob([await blob.arrayBuffer()],{type:'video/mp4'});await put('media',v.sha256,blob);const saved=await get('media',v.sha256);if(!(saved instanceof Blob)||saved.size!==v.bytes)throw new Error('写入后检查未通过，请重新导入。');}
+   if(!(blob instanceof Blob)||blob.size!==v.bytes||await sha256(blob)!==v.sha256){blob=await entryBlob(file,entries.get(v.archivePath),'video/mp4');if(await sha256(blob)!==v.sha256)throw new Error(`“${v.title}”不完整，请重新传入视频包。`);blob=new Blob([await blob.arrayBuffer()],{type:'video/mp4'});await put('media',v.sha256,blob);const saved=await get('media',v.sha256);if(!(saved instanceof Blob)||saved.size!==v.bytes||await sha256(saved)!==v.sha256)throw new Error('写入后的完整性检查未通过，请重新选择原视频包。');}
    $('#progress').value=Math.round((i+1)/next.videos.length*100);
   }
   if(!await checkLibrary(next))throw new Error('视频未全部保存完成。');await put('settings','catalog',next);catalog=next;await showLibrary();
