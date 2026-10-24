@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION='7';
+const APP_VERSION='8';
 const $=s=>document.querySelector(s), player=$('#player');
 let db, catalog=null, currentChild='', selected=null, objectURL=null, selectionVersion=0, shellReady=false, busy=false, mediaRangeReady=false, playbackTimer=null, playbackRoute='memory', compatibleTicket=0;
 const en=player.addTextTrack('subtitles','English','en'),zh=player.addTextTrack('subtitles','中文','zh');en.mode=zh.mode='disabled';
@@ -121,11 +121,11 @@ function validateCatalog(c,entries){
  if(c?.format!=='family-cinema-pack-v1'||!Array.isArray(c.videos)||!c.videos.length||c.videos.length>100)throw new Error('不是本次小影院视频包。');const ids=new Set();
  for(const v of c.videos){if(typeof v.key!=='string'||ids.has(v.key)||!/^media\/[a-zA-Z0-9_-]+\.mp4$/.test(v.archivePath)||! /^[a-f0-9]{64}$/.test(v.sha256)||!Number.isSafeInteger(v.bytes)||v.bytes<=0||v.bytes>512*1024*1024||entries.get(v.archivePath)?.length!==v.bytes)throw new Error('视频包清单与文件不一致。');ids.add(v.key);if(v.practice!==undefined&&(typeof v.practice!=='string'||v.practice.length>8000))throw new Error('练习说明异常。');for(const k of ['child','title','performer','focus','note','time'])if(typeof v[k]!=='string'||v[k].length>3000)throw new Error('视频说明异常。');if(!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(v.posterData)||v.posterData.length>2e6)throw new Error('封面数据异常。');for(const cs of Object.values(v.tracks||{})){if(!Array.isArray(cs)||cs.length>10000)throw new Error('字幕异常。');for(const q of cs)if(!Number.isFinite(q.s)||!Number.isFinite(q.e)||q.s<0||q.e<=q.s||typeof q.t!=='string'||q.t.length>5000)throw new Error('字幕时间异常。');}}
 }
-$('#import').onclick=()=>{
+$('#file').onclick=()=>{
  if(busy)return;
- $('#file').value='';setStatus('请选择新增视频包或原ZIP恢复包。选好后这里会立即显示读取进度。');$('#file').click();
+ $('#file').value='';setStatus('正在打开系统文件选择窗口。请选择原来的ZIP视频包，不要解压。');
 };
-$('#file').oncancel=()=>{if(!busy)setStatus('尚未选择视频包。点上方按钮，选择原来的ZIP即可。');};
+$('#file').oncancel=()=>{if(!busy)setStatus('系统未返回文件。如果没有弹出文件选择窗口，请换用Chrome打开本地址后再选原ZIP。');};
 $('#file').onchange=async()=>{
  const file=$('#file').files?.[0];if(!file||busy)return;
  $('#file').value='';
