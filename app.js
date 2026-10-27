@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION='8';
+const APP_VERSION='9';
 const $=s=>document.querySelector(s), player=$('#player');
 let db, catalog=null, currentChild='', selected=null, objectURL=null, selectionVersion=0, shellReady=false, busy=false, mediaRangeReady=false, playbackTimer=null, playbackRoute='memory', compatibleTicket=0;
 const en=player.addTextTrack('subtitles','English','en'),zh=player.addTextTrack('subtitles','中文','zh');en.mode=zh.mode='disabled';
@@ -44,8 +44,9 @@ async function checkLibrary(c){if(!c?.videos?.length)return false;for(const v of
 function readiness(){const n=catalog?.videos?.length||0;$('#badge').textContent=n?`${n} 条本地视频 · 不自动连播`:'首次使用，请导入视频包';$('#offlineStatus').textContent=n?(shellReady?' · 离线页面已就绪':' · 离线页面待检查'):'';}
 function applyCaptions(){const val=$('#captions').value;en.mode=val==='en'?'showing':'disabled';zh.mode=val==='zh'?'showing':'disabled';}
 $('#captions').onchange=applyCaptions;
-function renderTabs(){const t=$('#tabs');t.replaceChildren();for(const child of [...new Set(catalog.videos.map(v=>v.child))]){const b=document.createElement('button');b.textContent=child+' · '+(catalog.groups?.[child]||'视频');b.className=child===currentChild?'active':'';b.setAttribute('aria-pressed',String(child===currentChild));b.onclick=()=>{currentChild=child;renderTabs();selectVideo(catalog.videos.find(v=>v.child===child),false);};t.append(b);}}
-function renderCards(){const cards=$('#cards');cards.replaceChildren();for(const v of catalog.videos.filter(v=>v.child===currentChild)){const b=document.createElement('button');b.className='card'+(selected?.key===v.key?' selected':'');const thumb=document.createElement('div');thumb.className='thumb';const im=document.createElement('img');im.alt='';im.src=v.posterData;const dur=document.createElement('span');dur.className='duration';dur.textContent=v.time;thumb.append(im,dur);const text=document.createElement('div');text.className='text';for(const [tag,cls,value]of[['div','type',v.performer],['h3','',v.title],['p','',v.focus]]){const x=document.createElement(tag);x.className=cls;x.textContent=value;text.append(x);}b.append(thumb,text);b.onclick=()=>selectVideo(v,true);cards.append(b);}}
+function groupVideos(child){return catalog.videos.filter(v=>v.child===child).sort((a,b)=>(a.sortOrder??1000)-(b.sortOrder??1000));}
+function renderTabs(){const t=$('#tabs');t.replaceChildren();for(const child of [...new Set(catalog.videos.map(v=>v.child))]){const b=document.createElement('button');b.textContent=child+' · '+(catalog.groups?.[child]||'视频');b.className=child===currentChild?'active':'';b.setAttribute('aria-pressed',String(child===currentChild));b.onclick=()=>{currentChild=child;renderTabs();selectVideo(groupVideos(child)[0],false);};t.append(b);}}
+function renderCards(){const cards=$('#cards');cards.replaceChildren();for(const v of groupVideos(currentChild)){const b=document.createElement('button');b.className='card'+(selected?.key===v.key?' selected':'');const thumb=document.createElement('div');thumb.className='thumb';const im=document.createElement('img');im.alt='';im.src=v.posterData;const dur=document.createElement('span');dur.className='duration';dur.textContent=v.time;thumb.append(im,dur);const text=document.createElement('div');text.className='text';for(const [tag,cls,value]of[['div','type',v.performer],['h3','',v.title],['p','',v.focus]]){const x=document.createElement(tag);x.className=cls;x.textContent=value;text.append(x);}b.append(thumb,text);b.onclick=()=>selectVideo(v,true);cards.append(b);}}
 function startPlayback(){
  clearTimeout(playbackTimer);$('#playerError').textContent='';
  // Called synchronously from a tap when the selected source is already prepared.
@@ -89,7 +90,7 @@ player.addEventListener('error',()=>{
  clearTimeout(playbackTimer);const code=player.error?.code||0;
  $('#playerError').textContent=`视频完整性已通过，但播放失败（错误 ${code}）。请把此提示告诉家长。`;
 });
-async function showLibrary(){currentChild=catalog.videos[0].child;renderTabs();await selectVideo(catalog.videos[0]);readiness();$('#closeSetup').hidden=false;}
+async function showLibrary(){const children=[...new Set(catalog.videos.map(v=>v.child))];const start=Number(new URLSearchParams(location.search).get('start'));currentChild=children.includes(catalog.preferredGroup)?catalog.preferredGroup:(Number.isInteger(start)&&start>=1&&start<=children.length?children[start-1]:children[0]);renderTabs();await selectVideo(groupVideos(currentChild)[0]);readiness();$('#closeSetup').hidden=false;}
 $('#manage').onclick=()=>{$('#setup').hidden=false;$('#setup').scrollIntoView({behavior:'smooth'});};$('#closeSetup').onclick=()=>{$('#setup').hidden=true;};
 // Read only the ZIP directory and one stored entry at a time; avoid loading the whole 300 MB archive into memory.
 async function zipEntries(file){
@@ -113,13 +114,18 @@ async function entryBlob(file,entry,type='application/octet-stream'){
 }
 async function sha256(blob){const bytes=await crypto.subtle.digest('SHA-256',await blob.arrayBuffer());return Array.from(new Uint8Array(bytes)).map(v=>v.toString(16).padStart(2,'0')).join('');}
 function mergeCatalogs(previous,incoming){
- const videos=new Map((previous?.videos||[]).map(v=>[v.key,v]));
- for(const v of incoming.videos)videos.set(v.key,v);
- return {...previous,...incoming,groups:{...previous?.groups,...incoming.groups},videos:[...videos.values()]};
+ const removedKeys=[...new Set([...(previous?.removedKeys||[]),...(incoming.removedKeys||[])])];
+ const removed=new Set(removedKeys);
+ const videos=new Map((previous?.videos||[]).filter(v=>!removed.has(v.key)).map(v=>[v.key,v]));
+ for(const v of incoming.videos)if(!removed.has(v.key))videos.set(v.key,v);
+ return {...previous,...incoming,groups:{...previous?.groups,...incoming.groups},removedKeys,videos:[...videos.values()]};
 }
 function validateCatalog(c,entries){
  if(c?.format!=='family-cinema-pack-v1'||!Array.isArray(c.videos)||!c.videos.length||c.videos.length>100)throw new Error('不是本次小影院视频包。');const ids=new Set();
- for(const v of c.videos){if(typeof v.key!=='string'||ids.has(v.key)||!/^media\/[a-zA-Z0-9_-]+\.mp4$/.test(v.archivePath)||! /^[a-f0-9]{64}$/.test(v.sha256)||!Number.isSafeInteger(v.bytes)||v.bytes<=0||v.bytes>512*1024*1024||entries.get(v.archivePath)?.length!==v.bytes)throw new Error('视频包清单与文件不一致。');ids.add(v.key);if(v.practice!==undefined&&(typeof v.practice!=='string'||v.practice.length>8000))throw new Error('练习说明异常。');for(const k of ['child','title','performer','focus','note','time'])if(typeof v[k]!=='string'||v[k].length>3000)throw new Error('视频说明异常。');if(!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(v.posterData)||v.posterData.length>2e6)throw new Error('封面数据异常。');for(const cs of Object.values(v.tracks||{})){if(!Array.isArray(cs)||cs.length>10000)throw new Error('字幕异常。');for(const q of cs)if(!Number.isFinite(q.s)||!Number.isFinite(q.e)||q.s<0||q.e<=q.s||typeof q.t!=='string'||q.t.length>5000)throw new Error('字幕时间异常。');}}
+ if(c.removedKeys!==undefined&&(!Array.isArray(c.removedKeys)||c.removedKeys.length>100||c.removedKeys.some(k=>typeof k!=='string'||! /^[a-zA-Z0-9_-]{1,100}$/.test(k))))throw new Error('移出片单说明异常。');
+ if(c.preferredGroup!==undefined&&(typeof c.preferredGroup!=='string'||c.preferredGroup.length>100))throw new Error('默认分组异常。');
+ if(c.videos.some(v=>c.removedKeys?.includes(v.key)))throw new Error('视频包同时加入和移出了同一条内容。');
+ for(const v of c.videos){if(typeof v.key!=='string'||ids.has(v.key)||!/^media\/[a-zA-Z0-9_-]+\.mp4$/.test(v.archivePath)||! /^[a-f0-9]{64}$/.test(v.sha256)||!Number.isSafeInteger(v.bytes)||v.bytes<=0||v.bytes>512*1024*1024||entries.get(v.archivePath)?.length!==v.bytes)throw new Error('视频包清单与文件不一致。');ids.add(v.key);if(v.sortOrder!==undefined&&(!Number.isFinite(v.sortOrder)||v.sortOrder<0||v.sortOrder>1000000))throw new Error('选片顺序异常。');if(v.practice!==undefined&&(typeof v.practice!=='string'||v.practice.length>8000))throw new Error('练习说明异常。');for(const k of ['child','title','performer','focus','note','time'])if(typeof v[k]!=='string'||v[k].length>3000)throw new Error('视频说明异常。');if(!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(v.posterData)||v.posterData.length>2e6)throw new Error('封面数据异常。');for(const cs of Object.values(v.tracks||{})){if(!Array.isArray(cs)||cs.length>10000)throw new Error('字幕异常。');for(const q of cs)if(!Number.isFinite(q.s)||!Number.isFinite(q.e)||q.s<0||q.e<=q.s||typeof q.t!=='string'||q.t.length>5000)throw new Error('字幕时间异常。');}}
 }
 $('#file').onclick=()=>{
  if(busy)return;
